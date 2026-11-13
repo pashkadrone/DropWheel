@@ -10,6 +10,10 @@ final class DragWatcher {
     private var wasDown = false
     private var countAtMouseDown = 0
     private var wheelCenter = NSPoint.zero
+    private var job: Task<Void, Never>?
+    private var jobID = 0
+    /// Номер работы, которой сейчас принадлежит плашка; nil, когда ничего не выполняется.
+    private var runningID: Int?
 
     func start() {
         wheel.wheelView.onDrop = { [weak self] urls, format in self?.convert(urls, to: format) }
@@ -62,10 +66,29 @@ final class DragWatcher {
         wheel.hide()
         let files = urls.filter { FileKind.of($0) == format.kind }
         guard !files.isEmpty else { return }
-        let center = wheelCenter
-        toast.show(format.isTool ? "\(format.label)…" : "Конвертирую в \(format.label)…", at: center, autoHide: false)
 
-        Task.detached(priority: .userInitiated) { [toast] in
+        jobID += 1
+        let id = jobID
+        runningID = id
+        let center = wheelCenter
+        let title = format.isTool ? "\(format.label)…" : "Конвертирую в \(format.label)…"
+        let cancel: () -> Void = { [weak self] in self?.cancelJob(id, at: center) }
+        toast.show(title, at: center, autoHide: false, onClick: cancel)
+
+        // fraction — готовность текущего файла (известна только для видео и звука из видео).
+        let report: @Sendable (Int, Double?) -> Void = { [weak self] index, fraction in
+            DispatchQueue.main.async {
+                guard let self, self.runningID == id else { return }
+                var text = title
+                if let fraction { text += " \(Int(fraction * 100))%" }
+                if files.count > 1 { text += " · \(index + 1) из \(files.count)" }
+                let overall = (Double(index) + (fraction ?? 0)) / Double(files.count)
+                self.toast.show(text, at: center, autoHide: false,
+                                progress: fraction == nil && files.count == 1 ? nil : overall, onClick: cancel)
+            }
+        }
+
+        job = Task.detached(priority: .userInitiated) { [weak self] in
             var done = 0
             var lastError: String?
             if format.batch {
@@ -76,17 +99,23 @@ final class DragWatcher {
                     lastError = error.localizedDescription
                 }
             } else {
-                for file in files {
+                for (index, file) in files.enumerated() {
+                    if Task.isCancelled { break }
+                    if files.count > 1 { report(index, nil) }
                     do {
-                        _ = try await Converter.convert(file, to: format)
+                        _ = try await Converter.convert(file, to: format) { fraction in report(index, fraction) }
                         done += 1
                     } catch {
                         lastError = error.localizedDescription
                     }
                 }
             }
+
             let message: String
-            if let lastError, done == 0 {
+            let cancelled = Task.isCancelled
+            if cancelled {
+                message = done > 0 ? "Отменено, готово файлов: \(done)" : "Отменено"
+            } else if let lastError, done == 0 {
                 message = "Не получилось: \(lastError)"
             } else if lastError != nil {
                 message = "Готово: \(done) из \(files.count)"
@@ -95,11 +124,19 @@ final class DragWatcher {
             } else {
                 message = files.count == 1 ? "Готово → \(format.label)" : "Готово: \(done) → \(format.label)"
             }
-            let failed = done == 0
-            await MainActor.run {
-                toast.show(message, at: center, autoHide: true)
-                if failed { NSSound.beep() } else { NSSound(named: "Glass")?.play() }
+            let failed = done == 0 && !cancelled
+            await MainActor.run { [weak self] in
+                guard let self, self.runningID == id else { return }
+                self.runningID = nil
+                self.toast.show(message, at: center, autoHide: true)
+                if failed { NSSound.beep() } else if !cancelled { NSSound(named: "Glass")?.play() }
             }
         }
+    }
+
+    private func cancelJob(_ id: Int, at center: NSPoint) {
+        guard runningID == id else { return }
+        job?.cancel()
+        toast.show("Отменяю…", at: center, autoHide: false)
     }
 }

@@ -1,50 +1,56 @@
 import AppKit
 
-// Проверка конвертации из терминала: DropWheel --convert <файл> <формат>
-let arguments = CommandLine.arguments
-if arguments.count == 4, arguments[1] == "--convert" {
-    let url = URL(fileURLWithPath: arguments[2])
-    let wanted = arguments[3].lowercased()
-    guard let format = Converter.formats(for: url).first(where: { $0.label.lowercased() == wanted }) else {
-        print("Нет такого формата. Доступны: \(Converter.formats(for: url).map(\.label).joined(separator: ", "))")
-        exit(2)
-    }
-    Task.detached {
-        do {
-            let outputs = try await Converter.convert(url, to: format)
-            print(outputs.map(\.path).joined(separator: "\n"))
-            exit(0)
-        } catch {
-            print("Ошибка: \(error.localizedDescription)")
-            exit(1)
-        }
-    }
-    dispatchMain()
-}
-
-// Проверка инструментов из терминала: DropWheel --tool <название> <файлы…>
-if arguments.count >= 4, arguments[1] == "--tool" {
-    let urls = arguments.dropFirst(3).map { URL(fileURLWithPath: $0) }
-    guard let tool = Converter.tools(for: urls).first(where: { $0.label == arguments[2] }) else {
-        print("Нет такого инструмента. Доступны: \(Converter.tools(for: urls).map(\.label).joined(separator: ", "))")
-        exit(2)
-    }
-    Task.detached {
+// Запуск из терминала для автотестов (tests/run.sh):
+//   DropWheel --convert <файл> <формат>
+//   DropWheel --tool <название> <файлы…>
+// Прогресс пишется в stderr строками «progress 0.42». Переменная DROPWHEEL_CANCEL_AFTER=<секунды>
+// отменяет работу через указанное время. Коды возврата: 0 готово, 1 ошибка, 2 нет такого сектора, 3 отменено.
+func runFromTerminal(_ urls: [URL], _ format: Format) -> Never {
+    let task = Task.detached {
         do {
             var outputs: [URL] = []
-            if tool.batch {
-                outputs = try await Converter.convertBatch(urls, to: tool)
+            if format.batch {
+                outputs = try await Converter.convertBatch(urls, to: format)
             } else {
-                for url in urls { outputs += try await Converter.convert(url, to: tool) }
+                for url in urls {
+                    outputs += try await Converter.convert(url, to: format) { fraction in
+                        FileHandle.standardError.write(Data("progress \(fraction)\n".utf8))
+                    }
+                }
             }
             print(outputs.map(\.path).joined(separator: "\n"))
             exit(0)
         } catch {
+            if error is CancellationError || Task.isCancelled {
+                print("Отменено")
+                exit(3)
+            }
             print("Ошибка: \(error.localizedDescription)")
             exit(1)
         }
     }
+    if let value = ProcessInfo.processInfo.environment["DROPWHEEL_CANCEL_AFTER"], let seconds = Double(value) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { task.cancel() }
+    }
     dispatchMain()
+}
+
+func sector(_ label: String, in sectors: [Format]) -> Format {
+    guard let found = sectors.first(where: { $0.label.lowercased() == label.lowercased() }) else {
+        print("Нет такого сектора. Доступны: \(sectors.map(\.label).joined(separator: ", "))")
+        exit(2)
+    }
+    return found
+}
+
+let arguments = CommandLine.arguments
+if arguments.count == 4, arguments[1] == "--convert" {
+    let url = URL(fileURLWithPath: arguments[2])
+    runFromTerminal([url], sector(arguments[3], in: Converter.formats(for: url)))
+}
+if arguments.count >= 4, arguments[1] == "--tool" {
+    let urls = arguments.dropFirst(3).map { URL(fileURLWithPath: $0) }
+    runFromTerminal(urls, sector(arguments[2], in: Converter.tools(for: urls)))
 }
 
 let app = NSApplication.shared

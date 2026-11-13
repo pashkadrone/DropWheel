@@ -52,6 +52,9 @@ struct ConvertError: LocalizedError {
 }
 
 enum Converter {
+    /// Доля готовности от 0 до 1; вызывается не из главного потока.
+    typealias Progress = @Sendable (Double) -> Void
+
     // MARK: - Какие форматы показать для файла
 
     static func formats(for url: URL) -> [Format] {
@@ -154,18 +157,19 @@ enum Converter {
     }
 
     /// Создаёт копию рядом с оригиналом и возвращает пути новых файлов.
-    static func convert(_ url: URL, to format: Format) async throws -> [URL] {
+    static func convert(_ url: URL, to format: Format, progress: Progress? = nil) async throws -> [URL] {
         switch format.target {
         case .image(let type):
             return [try convertImage(url, type: type, ext: format.ext)]
         case .video(let preset, let fileType, let passthroughFirst):
             let output = try await exportMedia(url, preset: preset, fileType: fileType, ext: format.ext,
-                                               suffix: suffix(for: format, source: url), passthroughFirst: passthroughFirst)
+                                               suffix: suffix(for: format, source: url),
+                                               passthroughFirst: passthroughFirst, progress: progress)
             let isCompress = format.isTool && format.label == "Сжать"
             return [isCompress ? try keepOnlyIfSmaller(output, than: url) : output]
         case .audioM4A:
             return [try await exportMedia(url, preset: AVAssetExportPresetAppleM4A, fileType: .m4a, ext: "m4a",
-                                          suffix: "", passthroughFirst: false)]
+                                          suffix: "", passthroughFirst: false, progress: progress)]
         case .audioPCM(let bigEndian):
             return [try convertAudioPCM(url, ext: format.ext, bigEndian: bigEndian)]
         case .pdfPages(let type):
@@ -175,7 +179,7 @@ enum Converter {
             let isCompress = scale == nil && maxSide == nil
             return [isCompress ? try keepOnlyIfSmaller(output, than: url) : output]
         case .videoMute:
-            return [try await muteVideo(url)]
+            return [try await muteVideo(url, progress: progress)]
         case .pdfSplit:
             return try splitPDF(url)
         case .imagesToPDF, .pdfMerge:
@@ -354,18 +358,19 @@ enum Converter {
     // MARK: Видео и звук из видео
 
     private static func exportMedia(_ url: URL, preset: String, fileType: AVFileType, ext: String,
-                                    suffix: String, passthroughFirst: Bool) async throws -> URL {
+                                    suffix: String, passthroughFirst: Bool, progress: Progress?) async throws -> URL {
         let asset = AVURLAsset(url: url)
         if fileType == .m4a, try await asset.loadTracks(withMediaType: .audio).isEmpty {
             throw ConvertError("в этом видео нет звука")
         }
         let output = outputURL(for: url, suffix: suffix, ext: ext)
-        try await export(asset, to: output, preset: preset, fileType: fileType, passthroughFirst: passthroughFirst)
+        try await export(asset, to: output, preset: preset, fileType: fileType,
+                         passthroughFirst: passthroughFirst, progress: progress)
         return output
     }
 
     /// Копия видео без звуковой дорожки; картинка не перекодируется.
-    private static func muteVideo(_ url: URL) async throws -> URL {
+    private static func muteVideo(_ url: URL, progress: Progress?) async throws -> URL {
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration)
         let composition = AVMutableComposition()
@@ -379,30 +384,48 @@ enum Converter {
         let isMOV = url.pathExtension.lowercased() == "mov"
         let output = outputURL(for: url, suffix: " без звука", ext: isMOV ? "mov" : "mp4")
         try await export(composition, to: output, preset: AVAssetExportPresetHighestQuality,
-                         fileType: isMOV ? .mov : .mp4, passthroughFirst: true)
+                         fileType: isMOV ? .mov : .mp4, passthroughFirst: true, progress: progress)
         return output
     }
 
+    /// Запускает экспорт, сообщает о прогрессе и прерывает его, если задачу отменили.
+    private static func run(_ session: AVAssetExportSession, to output: URL, as fileType: AVFileType,
+                            progress: Progress?) async throws {
+        let monitor = Task {
+            for await state in session.states(updateInterval: 0.1) {
+                if case .exporting(let current) = state { progress?(current.fractionCompleted) }
+            }
+        }
+        defer { monitor.cancel() }
+        try await withTaskCancellationHandler {
+            try await session.export(to: output, as: fileType)
+        } onCancel: {
+            session.cancelExport()
+        }
+        try Task.checkCancellation()
+    }
+
     private static func export(_ asset: AVAsset, to output: URL, preset: String, fileType: AVFileType,
-                               passthroughFirst: Bool) async throws {
+                               passthroughFirst: Bool, progress: Progress?) async throws {
         let ext = output.pathExtension
 
         if passthroughFirst, let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) {
             do {
-                try await session.export(to: output, as: fileType)
+                try await run(session, to: output, as: fileType, progress: progress)
                 return
             } catch {
                 try? FileManager.default.removeItem(at: output)
+                try Task.checkCancellation()
             }
         }
         guard let session = AVAssetExportSession(asset: asset, presetName: preset) else {
             throw ConvertError("этот файл нельзя конвертировать в \(ext.uppercased())")
         }
         do {
-            try await session.export(to: output, as: fileType)
+            try await run(session, to: output, as: fileType, progress: progress)
         } catch {
             try? FileManager.default.removeItem(at: output)
-            throw error
+            throw Task.isCancelled ? CancellationError() : error
         }
     }
 
@@ -428,6 +451,7 @@ enum Converter {
                 throw ConvertError("не удалось прочитать звук")
             }
             while input.framePosition < input.length {
+                try Task.checkCancellation()
                 try input.read(into: buffer)
                 if buffer.frameLength == 0 { break }
                 try file.write(from: buffer)
@@ -482,6 +506,7 @@ enum Converter {
         var outputs: [URL] = []
 
         for number in 1...pages {
+            try Task.checkCancellation()
             guard let page = document.page(at: number) else { continue }
             var size = page.getBoxRect(.cropBox).size
             if page.rotationAngle % 180 != 0 { size = CGSize(width: size.height, height: size.width) }

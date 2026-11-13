@@ -16,3 +16,11 @@ xcodebuild -project DropWheel.xcodeproj -target DropWheel -configuration Release
 ```
 
 Готовое приложение появится в `build/Release/DropWheel.app`.
+
+## Тесты
+
+```bash
+tests/run.sh
+```
+
+Скрипт собирает приложение и проверяет все конвертации и инструменты на свежих тестовых файлах.
