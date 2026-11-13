@@ -1,5 +1,6 @@
 # Результаты сборки
 build/
+release/
 DerivedData/
 
 # Личные настройки Xcode
