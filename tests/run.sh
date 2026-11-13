@@ -95,6 +95,15 @@ DROPWHEEL_CANCEL_AFTER=0.25 "$APP" --convert "$WORK/big.mov" HEVC >/dev/null 2>&
 is "отмена прерывает конвертацию" "$?" "3"
 [[ ! -e "$WORK/big HEVC.mp4" ]] && ok "после отмены не остаётся недописанного файла" || bad "после отмены не остаётся недописанного файла"
 
+echo "Внешний вид"
+for look in "dark shift c.heic" "light command a.jpg" "dark shift big.mov" "light command doc.pdf"; do
+    parts=(${=look})
+    "$APP" --render-wheel "$WORK/wheel.png" $parts[1] $parts[2] 1 "$WORK/$parts[3]" >/dev/null 2>&1
+    is "колесо рисуется: $look" "$(width "$WORK/wheel.png" | awk '{print ($1 >= 340) ? "да" : "нет"}')" "да"
+    rm -f "$WORK/wheel.png"
+done
+made "иконка приложения в сборке" "$ROOT/build/Release/DropWheel.app/Contents/Resources/AppIcon.icns"
+
 echo
 echo "Прошло: $PASS, сбоев: $FAIL"
 [[ $FAIL -eq 0 ]]

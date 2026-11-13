@@ -53,6 +53,22 @@ if arguments.count >= 4, arguments[1] == "--tool" {
     runFromTerminal(urls, sector(arguments[2], in: Converter.tools(for: urls)))
 }
 
+// Картинка колеса для проверки внешнего вида:
+//   DropWheel --render-wheel <out.png> <dark|light> <shift|command> <активный сектор> <файлы…>
+if arguments.count >= 7, arguments[1] == "--render-wheel" {
+    _ = NSApplication.shared
+    let urls = arguments.dropFirst(6).map { URL(fileURLWithPath: $0) }
+    let view = WheelView(frame: NSRect(x: 0, y: 0, width: WheelPanel.side, height: WheelPanel.side))
+    view.appearance = NSAppearance(named: arguments[3] == "dark" ? .darkAqua : .aqua)
+    view.formats = arguments[4] == "command" ? Converter.tools(for: urls) : Converter.formats(for: urls[0])
+    view.highlighted = Int(arguments[5])
+    guard !view.formats.isEmpty, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let data = rep.representation(using: .png, properties: [:]),
+          (try? data.write(to: URL(fileURLWithPath: arguments[2]))) != nil else { exit(1) }
+    exit(0)
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
