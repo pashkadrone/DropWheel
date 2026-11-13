@@ -53,6 +53,39 @@ if arguments.count >= 4, arguments[1] == "--tool" {
     runFromTerminal(urls, sector(arguments[2], in: Converter.tools(for: urls)))
 }
 
+// Обрезка без окна: DropWheel --crop <файл> <x> <y> <ширина> <высота>, всё в долях картинки от левого верхнего угла.
+if arguments.count == 7, arguments[1] == "--crop" {
+    let numbers = arguments[3...6].compactMap { Double($0) }
+    guard numbers.count == 4 else { exit(2) }
+    do {
+        let area = CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+        print(try Converter.cropImage(URL(fileURLWithPath: arguments[2]), to: area).path)
+        exit(0)
+    } catch {
+        print("Ошибка: \(error.localizedDescription)")
+        exit(1)
+    }
+}
+
+// Картинка окна обрезки для проверки внешнего вида: DropWheel --render-crop <out.png> <файл>
+if arguments.count == 4, arguments[1] == "--render-crop" {
+    _ = NSApplication.shared
+    guard let controller = CropWindowController(url: URL(fileURLWithPath: arguments[3]), onFinish: { _ in }),
+          let view = controller.contentViewForRendering,
+          let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+    view.cacheDisplay(in: view.bounds, to: rep)
+    guard let data = rep.representation(using: .png, properties: [:]),
+          (try? data.write(to: URL(fileURLWithPath: arguments[2]))) != nil else { exit(1) }
+    // Раскладка элементов окна: кнопки на картинку не попадают, поэтому проверяем их положение числами.
+    print("window \(Int(view.bounds.width))x\(Int(view.bounds.height))")
+    for subview in view.subviews {
+        let name = (subview as? NSButton)?.title ?? String(describing: type(of: subview))
+        let frame = subview.frame
+        print("\(name): x=\(Int(frame.minX)) y=\(Int(frame.minY)) w=\(Int(frame.width)) h=\(Int(frame.height))")
+    }
+    exit(0)
+}
+
 // Картинка колеса для проверки внешнего вида:
 //   DropWheel --render-wheel <out.png> <dark|light> <shift|command> <активный сектор> <файлы…>
 if arguments.count >= 7, arguments[1] == "--render-wheel" {

@@ -29,6 +29,8 @@ struct Format {
         case pdfPages(UTType)
         // Инструменты (колесо по Command)
         case imageResave(quality: Double, scale: CGFloat?, maxSide: Int?, suffix: String)
+        /// Обрезка: область выбирается в отдельном окне, см. CropWindow.swift.
+        case imageCrop
         case imagesToPDF
         case videoMute
         case pdfMerge
@@ -124,6 +126,7 @@ enum Converter {
         case .image:
             return [
                 tool("Сжать", .imageResave(quality: 0.6, scale: nil, maxSide: nil, suffix: " сжато")),
+                tool("Обрезать", .imageCrop),
                 tool("50%", .imageResave(quality: 0.85, scale: 0.5, maxSide: nil, suffix: " 50%")),
                 tool("1920px", .imageResave(quality: 0.85, scale: nil, maxSide: 1920, suffix: " 1920px")),
                 tool("1280px", .imageResave(quality: 0.85, scale: nil, maxSide: 1280, suffix: " 1280px")),
@@ -178,6 +181,8 @@ enum Converter {
             let output = try resaveImage(url, quality: quality, scale: scale, maxSide: maxSide, suffix: suffix)
             let isCompress = scale == nil && maxSide == nil
             return [isCompress ? try keepOnlyIfSmaller(output, than: url) : output]
+        case .imageCrop:
+            throw ConvertError("обрезка открывается в отдельном окне")
         case .videoMute:
             return [try await muteVideo(url, progress: progress)]
         case .pdfSplit:
@@ -285,6 +290,58 @@ enum Converter {
             kCGImageDestinationBackgroundColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1),
         ] as CFDictionary
         CGImageDestinationAddImage(destination, image, options)
+        guard CGImageDestinationFinalize(destination) else {
+            try? FileManager.default.removeItem(at: output)
+            throw ConvertError("не удалось сохранить файл")
+        }
+        return output
+    }
+
+    // MARK: Обрезка
+
+    /// Уменьшенная копия для окна обрезки и полный размер картинки с учётом поворота.
+    static func previewImage(_ url: URL, maxPixel: Int) -> (image: CGImage, fullSize: CGSize)? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let size = pixelSize(of: source)
+        let longest = max(size.width, size.height)
+        guard longest > 0, let image = uprightImage(from: source, maxPixel: min(longest, maxPixel)) else { return nil }
+        let scale = CGFloat(longest) / CGFloat(max(image.width, image.height))
+        return (image, CGSize(width: (CGFloat(image.width) * scale).rounded(),
+                              height: (CGFloat(image.height) * scale).rounded()))
+    }
+
+    /// Обрезанная копия. area — область в долях картинки (0…1), начало координат в левом верхнем углу.
+    static func cropImage(_ url: URL, to area: CGRect) throws -> URL {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let full = uprightImage(from: source) else {
+            throw ConvertError("не удалось открыть изображение")
+        }
+        let width = CGFloat(full.width), height = CGFloat(full.height)
+        let pixels = CGRect(x: (area.minX * width).rounded(), y: (area.minY * height).rounded(),
+                            width: (area.width * width).rounded(), height: (area.height * height).rounded())
+            .intersection(CGRect(x: 0, y: 0, width: width, height: height))
+        guard pixels.width >= 1, pixels.height >= 1, let cropped = full.cropping(to: pixels) else {
+            throw ConvertError("область обрезки пустая")
+        }
+
+        // Формат оригинала сохраняем, если система умеет его записывать; иначе JPG.
+        let writable = Set((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? [])
+        var type = UTType.jpeg
+        var ext = "jpg"
+        if let sourceType = (CGImageSourceGetType(source) as String?).flatMap({ UTType($0) }),
+           writable.contains(sourceType.identifier) {
+            type = sourceType
+            ext = url.pathExtension
+        }
+        let output = outputURL(for: url, suffix: " обрезано", ext: ext)
+        guard let destination = CGImageDestinationCreateWithURL(output as CFURL, type.identifier as CFString, 1, nil) else {
+            throw ConvertError("формат \(ext.uppercased()) не поддерживается")
+        }
+        let options = [
+            kCGImageDestinationLossyCompressionQuality: 0.92,
+            kCGImageDestinationBackgroundColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1),
+        ] as CFDictionary
+        CGImageDestinationAddImage(destination, cropped, options)
         guard CGImageDestinationFinalize(destination) else {
             try? FileManager.default.removeItem(at: output)
             throw ConvertError("не удалось сохранить файл")

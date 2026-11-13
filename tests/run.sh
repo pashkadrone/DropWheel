@@ -58,6 +58,14 @@ tool "Сжать" "a сжато.jpg"; is "повторное сжатие отк
 tool "50%" a.jpg; is "50% уменьшает вдвое" "$(width "$WORK/a 50%.jpg")" "1500"
 tool "1920px" a.jpg; is "1920px" "$(width "$WORK/a 1920px.jpg")" "1920"
 tool "1280px" c.heic; is "1280px сохраняет HEIC" "$(width "$WORK/c 1280px.heic")" "1280"
+height() { sips -g pixelHeight "$1" 2>/dev/null | awk '/pixelHeight/ {print $2}'; }
+"$APP" --crop "$WORK/a.jpg" 0.25 0.25 0.5 0.25 >/dev/null 2>&1
+is "Обрезать: ширина области" "$(width "$WORK/a обрезано.jpg")" "1500"
+is "Обрезать: высота области" "$(height "$WORK/a обрезано.jpg")" "750"
+"$APP" --crop "$WORK/c.heic" 0.5 0.5 1 1 >/dev/null 2>&1
+is "Обрезать: область за краем урезается, HEIC сохраняется" "$(width "$WORK/c обрезано.heic")x$(height "$WORK/c обрезано.heic")" "1000x1000"
+"$APP" --crop "$WORK/b.png" 0.2 0.2 0 0 >/dev/null 2>&1; is "Обрезать: пустая область отклоняется" "$?" "1"
+"$APP" --render-crop "$WORK/crop.png" "$WORK/a.jpg" >/dev/null 2>&1; made "окно обрезки рисуется" "$WORK/crop.png"
 rm -f "$WORK/c.pdf"
 tool "В PDF" a.jpg b.png c.heic; is "В PDF: три картинки — три страницы" "$("$H" info "$WORK/a и ещё 2.pdf")" "pages=3"
 [[ $(size "$WORK/a и ещё 2.pdf") -lt 8000000 ]] && ok "PDF из картинок сжат" || bad "PDF из картинок сжат" "$(size "$WORK/a и ещё 2.pdf") байт"

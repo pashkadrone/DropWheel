@@ -209,6 +209,7 @@ final class WheelView: NSView {
         switch format.label {
         case "Сжать": name = "arrow.down.right.and.arrow.up.left"
         case "50%", "1920px", "1280px": name = "arrow.up.left.and.arrow.down.right"
+        case "Обрезать": name = "crop"
         case "В PDF": name = "doc.on.doc"
         case "Без звука": name = "speaker.slash"
         case "Склеить": name = "rectangle.stack"

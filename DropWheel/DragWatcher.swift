@@ -14,6 +14,7 @@ final class DragWatcher {
     private var jobID = 0
     /// Номер работы, которой сейчас принадлежит плашка; nil, когда ничего не выполняется.
     private var runningID: Int?
+    private var cropWindow: CropWindowController?
 
     func start() {
         wheel.wheelView.onDrop = { [weak self] urls, format in self?.convert(urls, to: format) }
@@ -64,6 +65,10 @@ final class DragWatcher {
 
     private func convert(_ urls: [URL], to format: Format) {
         wheel.hide()
+        if case .imageCrop = format.target {
+            openCropWindow(for: urls)
+            return
+        }
         let files = urls.filter { FileKind.of($0) == format.kind }
         guard !files.isEmpty else { return }
 
@@ -131,6 +136,32 @@ final class DragWatcher {
                 self.toast.show(message, at: center, autoHide: true)
                 if failed { NSSound.beep() } else if !cancelled { NSSound(named: "Glass")?.play() }
             }
+        }
+    }
+
+    /// Обрезка интерактивная, поэтому открывается окно для первой картинки из перетащенных.
+    private func openCropWindow(for urls: [URL]) {
+        guard let url = urls.first(where: { FileKind.of($0) == .image }) else { return }
+        let center = wheelCenter
+        cropWindow = CropWindowController(url: url) { [weak self] result in
+            guard let self else { return }
+            self.cropWindow = nil
+            switch result {
+            case .success:
+                self.toast.show("Готово: обрезано", at: center, autoHide: true)
+                NSSound(named: "Glass")?.play()
+            case .failure(let error):
+                self.toast.show("Не получилось: \(error.localizedDescription)", at: center, autoHide: true)
+                NSSound.beep()
+            case nil:
+                break
+            }
+        }
+        if let cropWindow {
+            cropWindow.show()
+        } else {
+            toast.show("Не получилось открыть картинку", at: center, autoHide: true)
+            NSSound.beep()
         }
     }
 
