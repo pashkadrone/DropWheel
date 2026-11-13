@@ -5,7 +5,12 @@
 ROOT="${0:A:h:h}"
 cd "$ROOT" || exit 1
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+# Отдельное хранилище настроек: тесты не читают и не меняют настоящие настройки пользователя.
+export DROPWHEEL_SUITE="local.dropwheel.tests"
+setting() { defaults write "$DROPWHEEL_SUITE" "$@"; }
+reset_settings() { defaults delete "$DROPWHEEL_SUITE" >/dev/null 2>&1; }
+reset_settings
+trap 'rm -rf "$WORK"; reset_settings' EXIT
 PASS=0
 FAIL=0
 
@@ -102,6 +107,33 @@ rm -f "$WORK/big HEVC.mp4"
 DROPWHEEL_CANCEL_AFTER=0.25 "$APP" --convert "$WORK/big.mov" HEVC >/dev/null 2>&1
 is "отмена прерывает конвертацию" "$?" "3"
 [[ ! -e "$WORK/big HEVC.mp4" ]] && ok "после отмены не остаётся недописанного файла" || bad "после отмены не остаётся недописанного файла"
+
+echo "Настройки"
+setting jpegQuality -float 0.6
+convert c.heic JPG
+[[ -s "$WORK/c 2.jpg" && $(size "$WORK/c 2.jpg") -lt $(size "$WORK/c.jpg") ]] && ok "низкое качество даёт файл меньше" || bad "низкое качество даёт файл меньше"
+reset_settings
+setting outputFolder -string "$WORK/готовое"
+convert b.png JPG; made "результат кладётся в выбранную папку" "$WORK/готовое/b.jpg"
+[[ ! -e "$WORK/b.jpg" ]] && ok "рядом с оригиналом копии нет" || bad "рядом с оригиналом копии нет"
+tool "50%" b.png; made "инструменты тоже кладут в выбранную папку" "$WORK/готовое/b 50%.png"
+setting outputFolder -string "/System/нет-такой-папки"
+convert b.png GIF; made "недоступная папка: результат рядом с оригиналом" "$WORK/b.gif"
+reset_settings
+setting hiddenFormats -array "image.TIFF" "video.HEVC"
+convert b.png TIFF; is "скрытый формат картинок пропадает из колеса" "$?" "2"
+convert big.mov HEVC; is "скрытый формат видео пропадает из колеса" "$?" "2"
+convert b.png BMP; made "остальные форматы работают" "$WORK/b.bmp"
+reset_settings
+convert b.png TIFF; made "после сброса настроек формат возвращается" "$WORK/b.tiff"
+menu() { "$APP" --dump-menu 2>/dev/null; }
+menu | grep -q "✓ Высокое (90%)" && menu | grep -q "✓ Рядом с оригиналом" && menu | grep -q "✓ TIFF" \
+    && ok "меню: настройки по умолчанию отмечены" || bad "меню: настройки по умолчанию отмечены"
+setting jpegQuality -float 0.75; setting outputFolder -string "$WORK/готовое"; setting hiddenFormats -array "image.TIFF"
+menu | grep -q "✓ Среднее (75%)" && ok "меню: отмечено выбранное качество" || bad "меню: отмечено выбранное качество"
+menu | grep -q "✓ В папку «готовое»" && ok "меню: показана выбранная папка" || bad "меню: показана выбранная папка"
+menu | grep -q "^    TIFF$" && ok "меню: скрытый формат без галочки" || bad "меню: скрытый формат без галочки"
+reset_settings
 
 echo "Внешний вид"
 for look in "dark shift c.heic" "light command a.jpg" "dark shift big.mov" "light command doc.pdf"; do

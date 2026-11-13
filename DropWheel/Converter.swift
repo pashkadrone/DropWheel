@@ -5,7 +5,7 @@ import ImageIO
 import PDFKit
 import UniformTypeIdentifiers
 
-enum FileKind {
+enum FileKind: String {
     case image, video, audio, pdf
 
     static func of(_ url: URL) -> FileKind? {
@@ -57,6 +57,28 @@ enum Converter {
     /// Доля готовности от 0 до 1; вызывается не из главного потока.
     typealias Progress = @Sendable (Double) -> Void
 
+    // MARK: - Все форматы колеса (для меню настроек)
+
+    private static var imageCandidates: [(String, String, UTType)] {
+        let writable = Set((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? [])
+        var candidates: [(String, String, UTType)] = [
+            ("JPG", "jpg", .jpeg), ("PNG", "png", .png), ("HEIC", "heic", .heic),
+            ("TIFF", "tiff", .tiff), ("GIF", "gif", .gif), ("BMP", "bmp", .bmp),
+            ("PDF", "pdf", .pdf), ("WEBP", "webp", .webP),
+        ]
+        if let avif = UTType("public.avif") { candidates.append(("AVIF", "avif", avif)) }
+        return candidates.filter { writable.contains($0.2.identifier) }
+    }
+
+    static func formatLabels(for kind: FileKind) -> [String] {
+        switch kind {
+        case .image: return imageCandidates.map(\.0)
+        case .video: return ["MP4", "MOV", "HEVC", "1080p", "720p", "M4A"]
+        case .audio: return ["M4A", "WAV", "AIFF"]
+        case .pdf: return ["JPG", "PNG", "TIFF"]
+        }
+    }
+
     // MARK: - Какие форматы показать для файла
 
     static func formats(for url: URL) -> [Format] {
@@ -66,15 +88,8 @@ enum Converter {
 
         switch kind {
         case .image:
-            let writable = Set((CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? [])
-            var candidates: [(String, String, UTType)] = [
-                ("JPG", "jpg", .jpeg), ("PNG", "png", .png), ("HEIC", "heic", .heic),
-                ("TIFF", "tiff", .tiff), ("GIF", "gif", .gif), ("BMP", "bmp", .bmp),
-                ("PDF", "pdf", .pdf), ("WEBP", "webp", .webP),
-            ]
-            if let avif = UTType("public.avif") { candidates.append(("AVIF", "avif", avif)) }
-            return candidates
-                .filter { writable.contains($0.2.identifier) && $0.2 != sourceType }
+            return imageCandidates
+                .filter { $0.2 != sourceType && !Settings.isHidden(.image, $0.0) }
                 .prefix(8)
                 .map { Format(label: $0.0, ext: $0.1, kind: .image, target: .image($0.2)) }
 
@@ -95,7 +110,7 @@ enum Converter {
             list.append(Format(label: "720p", ext: "mp4", kind: .video,
                                target: .video(preset: AVAssetExportPreset1280x720, fileType: .mp4, passthroughFirst: false)))
             list.append(Format(label: "M4A", ext: "m4a", kind: .video, target: .audioM4A))
-            return list
+            return list.filter { !Settings.isHidden(.video, $0.label) }
 
         case .audio:
             let all = [
@@ -178,8 +193,10 @@ enum Converter {
         case .pdfPages(let type):
             return try renderPDF(url, type: type, ext: format.ext)
         case .imageResave(let quality, let scale, let maxSide, let suffix):
-            let output = try resaveImage(url, quality: quality, scale: scale, maxSide: maxSide, suffix: suffix)
+            // У «Сжать» качество своё, пониженное; при изменении размера — из настроек.
             let isCompress = scale == nil && maxSide == nil
+            let output = try resaveImage(url, quality: isCompress ? quality : Settings.quality,
+                                         scale: scale, maxSide: maxSide, suffix: suffix)
             return [isCompress ? try keepOnlyIfSmaller(output, than: url) : output]
         case .imageCrop:
             throw ConvertError("обрезка открывается в отдельном окне")
@@ -205,7 +222,17 @@ enum Converter {
     }
 
     private static func outputURL(for source: URL, suffix: String = "", ext: String) -> URL {
-        let folder = source.deletingLastPathComponent()
+        var folder = source.deletingLastPathComponent()
+        // Своя папка из настроек; если она пропала или в неё нельзя писать, кладём рядом с оригиналом,
+        // чтобы результат не потерялся.
+        if let custom = Settings.outputFolder {
+            try? FileManager.default.createDirectory(at: custom, withIntermediateDirectories: true)
+            var isFolder: ObjCBool = false
+            if FileManager.default.fileExists(atPath: custom.path, isDirectory: &isFolder), isFolder.boolValue,
+               FileManager.default.isWritableFile(atPath: custom.path) {
+                folder = custom
+            }
+        }
         let base = source.deletingPathExtension().lastPathComponent + suffix
         var candidate = folder.appendingPathComponent("\(base).\(ext)")
         var number = 2
@@ -228,7 +255,7 @@ enum Converter {
         }
         // Качество для JPG/HEIC; для TIFF просим сжатие LZW (система применяет его не ко всем снимкам).
         let options = [
-            kCGImageDestinationLossyCompressionQuality: 0.9,
+            kCGImageDestinationLossyCompressionQuality: Settings.quality,
             kCGImageDestinationBackgroundColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1),
             kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFCompression: 5],
         ] as CFDictionary
@@ -338,7 +365,7 @@ enum Converter {
             throw ConvertError("формат \(ext.uppercased()) не поддерживается")
         }
         let options = [
-            kCGImageDestinationLossyCompressionQuality: 0.92,
+            kCGImageDestinationLossyCompressionQuality: Settings.quality,
             kCGImageDestinationBackgroundColor: CGColor(red: 1, green: 1, blue: 1, alpha: 1),
         ] as CFDictionary
         CGImageDestinationAddImage(destination, cropped, options)
@@ -584,7 +611,7 @@ enum Converter {
             guard let destination = CGImageDestinationCreateWithURL(output as CFURL, type.identifier as CFString, 1, nil) else {
                 throw ConvertError("формат \(ext.uppercased()) не поддерживается")
             }
-            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: Settings.quality] as CFDictionary)
             guard CGImageDestinationFinalize(destination) else {
                 throw ConvertError("не удалось сохранить страницу \(number)")
             }

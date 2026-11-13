@@ -53,6 +53,21 @@ if arguments.count >= 4, arguments[1] == "--tool" {
     runFromTerminal(urls, sector(arguments[2], in: Converter.tools(for: urls)))
 }
 
+// Печатает меню значка с галочками, чтобы тесты могли проверить его без мыши: DropWheel --dump-menu
+if arguments.count == 2, arguments[1] == "--dump-menu" {
+    _ = NSApplication.shared
+    let menu = NSMenu()
+    AppDelegate().menuNeedsUpdate(menu)
+    func dump(_ menu: NSMenu, indent: String) {
+        for item in menu.items where !item.isSeparatorItem {
+            print("\(indent)\(item.state == .on ? "✓ " : "")\(item.title)")
+            if let submenu = item.submenu { dump(submenu, indent: indent + "    ") }
+        }
+    }
+    dump(menu, indent: "")
+    exit(0)
+}
+
 // Обрезка без окна: DropWheel --crop <файл> <x> <y> <ширина> <высота>, всё в долях картинки от левого верхнего угла.
 if arguments.count == 7, arguments[1] == "--crop" {
     let numbers = arguments[3...6].compactMap { Double($0) }
